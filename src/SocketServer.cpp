@@ -15,7 +15,7 @@ extern "C"
 	//#include "user_interface.h"     // for struct rst_info
 	#include "lwip/init.h"			// for version info
 	#include "lwip/stats.h"			// for stats_display()
-#if ESP32
+#ifdef ESP32
 
 #elif LWIP_VERSION_MAJOR == 2
 	#include "lwip/apps/mdns.h"
@@ -26,10 +26,10 @@ extern "C"
 }
 
 #include <cstdarg>
-#if ESP32
-#include <WiFi.h>
+#ifdef ESP32
+	#include <WiFi.h>
 #else
-#include <ESP8266WiFi.h>
+	#include <ESP8266WiFi.h>
 #endif
 #include <DNSServer.h>
 #include <EEPROM.h>
@@ -45,12 +45,23 @@ extern "C"
 #include "Listener.h"
 #include "Misc.h"
 
-#if ESP32
+#ifdef ESP32
 #include "pins_arduino.h"
 #include "mdns.h"
+#include "esp_flash.h"
+#include "esp_mac.h"
+#include "spi_flash_mmap.h"
 #include "NetBIOS.h"
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "driver/gpio.h"  // For ESP32-S3 GPIO pull-up/pull-down configuration
+#endif
 const bool ONBOARD_LED_ON = true;					// active high
+// ESP32-S3: GPIO 32 is used by PSRAM, use GPIO 48 (RGB LED) or 2 instead
+#if CONFIG_IDF_TARGET_ESP32S3
+const unsigned int ONBOARD_LED = 48;  // GPIO 48 - common RGB LED pin on ESP32-S3 boards
+#else
 const unsigned int ONBOARD_LED = 32;
+#endif
 #else
 const bool ONBOARD_LED_ON = false;					// active low
 const unsigned int ONBOARD_LED = D4;				// GPIO 2
@@ -60,10 +71,10 @@ const uint32_t ONBOARD_LED_IO_INTERVAL = 50;
 const uint32_t ONBOARD_LED_BLINK_INTERVAL = 100;
 const uint32_t TransferReadyTimeout = 5;			// how many milliseconds we allow for the Duet to set TransferReady low after the end of a transaction, before we assume that we missed seeing it
 
-#if ESP32 || LWIP_VERSION_MAJOR == 2
+#if defined(ESP32) || LWIP_VERSION_MAJOR == 2
 const char * const MdnsProtocolNames[3] = { "HTTP", "FTP", "Telnet" };
 const char * const MdnsServiceStrings[3] = { "_http", "_ftp", "_telnet" };
-# if ESP32
+# ifdef ESP32
  const mdns_txt_item_t MdnsTxtRecords[2] = {
         {"version", VERSION_MAIN},
         {"product", "DuetWiFi"},
@@ -107,7 +118,7 @@ static uint32_t dataErrors = 0;
 static bool activeIO = false;
 static uint32_t connectCount = 0;
 
-#if !ESP32
+#ifndef ESP32
 ADC_MODE(ADC_VCC);          // need this for the ESP.getVcc() call to work
 #endif
 static HSPIClass hspi;
@@ -134,7 +145,7 @@ const WirelessConfigurationData *RetrieveSsidData(const char *ssid, int *index =
 {
 	for (size_t i = 1; i <= MaxRememberedNetworks; ++i)
 	{
-#if ESP32
+#ifdef ESP32
 		const WirelessConfigurationData *wp = reinterpret_cast<const WirelessConfigurationData*>(EEPROM.getDataPtr()+(i * sizeof(WirelessConfigurationData)));
 #else
 		const WirelessConfigurationData *wp = reinterpret_cast<const WirelessConfigurationData*>(EEPROM.getConstDataPtr()+(i * sizeof(WirelessConfigurationData)));
@@ -165,7 +176,7 @@ bool FindEmptySsidEntry(int *index)
 {
 	for (size_t i = 1; i <= MaxRememberedNetworks; ++i)
 	{
-#if ESP32
+#ifdef ESP32
 		const WirelessConfigurationData *wp = reinterpret_cast<const WirelessConfigurationData*>(EEPROM.getDataPtr()+(i * sizeof(WirelessConfigurationData)));
 #else
 		const WirelessConfigurationData *wp = reinterpret_cast<const WirelessConfigurationData*>(EEPROM.getConstDataPtr()+(i * sizeof(WirelessConfigurationData)));
@@ -218,7 +229,7 @@ pre(currentState == NetworkState::idle)
 	}
 	else
 		currentBssidPtr = nullptr;
-#if ESP32
+#ifdef ESP32
 	// On ESP32 we need to jump through a few hoops to get the hostname passed to the DHCP server
 	debugPrint("con1\n");
 	WiFi.setHostname(webHostName);
@@ -237,10 +248,12 @@ pre(currentState == NetworkState::idle)
 	WiFi.config(IPAddress(apData.ip), IPAddress(apData.gateway), IPAddress(apData.netmask), IPAddress(), IPAddress());
 #endif
 	WiFiInitialised = true;
+#ifndef ESP32
 	WiFi.setAutoConnect(false);
+#endif
 //	WiFi.setAutoReconnect(false);								// auto reconnect NEVER works in our configuration so disable it, it just wastes time
 	WiFi.setAutoReconnect(true);
-#if !ESP32
+#ifndef ESP32
 #if NO_WIFI_SLEEP
 	wifi_set_sleep_type(NONE_SLEEP_T);
 #else
@@ -262,7 +275,7 @@ pre(currentState == NetworkState::idle)
 	connectCount++;
 }
 
-#if !ESP32
+#ifndef ESP32
 void ConnectPoll()
 {
 	// The Arduino WiFi.status() call is fairly useless here because it discards too much information, so use the SDK API call instead
@@ -596,7 +609,7 @@ pre(currentState == WiFiState::idle)
 		return;
 	}
 	// Auto scan for strongest known network, then try to connect to it
-#if ESP32
+#ifdef ESP32
 	const int16_t num_ssids = WiFi.scanNetworks(false, true, false, 750);
 #else
 	const int16_t num_ssids = WiFi.scanNetworks(false, true, 0, ssidPtr, 500, 750);
@@ -746,7 +759,7 @@ void StartAccessPoint()
 			SafeStrncpy(currentSsid, apData.ssid, ARRAY_SIZE(currentSsid));
 			currentState = WiFiState::runningAsAccessPoint;
 			digitalWrite(ONBOARD_LED, ONBOARD_LED_ON);
-#if ESP32
+#ifdef ESP32
 			mdns_init();
 			RebuildServices();
 #elif LWIP_VERSION_MAJOR == 2
@@ -785,7 +798,7 @@ static union
 	uint32_t asDwords[headerDwords];	// to force alignment
 } messageHeaderOut;
 
-#if ESP32
+#ifdef ESP32
 static uint32_t GetResetReason()
 {
 	// Return the reason for the last hardware reset. Note that RRF expects the reason values to
@@ -950,6 +963,9 @@ void ICACHE_RAM_ATTR ProcessRequest()
 	}
 	// Begin the transaction
 	digitalWrite(SamSSPin, LOW);            // assert CS to SAM
+#if CONFIG_IDF_TARGET_ESP32S3
+	delayMicroseconds(2);                   // ESP32-S3: Small delay for CS setup time
+#endif
 	hspi.beginTransaction();
 	// Exchange headers, except for the last dword which will contain our response
 	hspi.transferDwords(messageHeaderOut.asDwords, messageHeaderIn.asDwords, headerDwords - 1);
@@ -1031,14 +1047,16 @@ void ICACHE_RAM_ATTR ProcessRequest()
 										  ? static_cast<uint32_t>(WiFi.localIP())
 											  : 0;
 				//response->freeHeap = system_get_free_heap_size();
-#if ESP32
+#ifdef ESP32
 				response->freeHeap = esp_get_free_heap_size();
 				response->resetReason = GetResetReason();
-				response->flashSize = spi_flash_get_chip_size();
+				uint32_t flash_size = 0;
+				esp_flash_get_size(NULL, &flash_size);
+				response->flashSize = flash_size;
 				response->rssi = WiFi.RSSI();
 				response->numClients = (runningAsAp) ? 10 : 0;
 				response->sleepMode = (uint8_t)1;
-				response->phyMode = WiFi.phyMode();
+				response->phyMode = 0; // phyMode not available on ESP32
 				response->vcc = 0;
 				response->clockReg = hspi.getClockDivider();;
 				// if connected return BSSID of AP to help identification
@@ -1154,7 +1172,7 @@ void ICACHE_RAM_ATTR ProcessRequest()
 				char *p = reinterpret_cast<char*>(transferBuffer);
 				for (size_t i = 0; i <= MaxRememberedNetworks && (i + 1) * ReducedWirelessConfigurationDataSize <= dataBufferAvailable; ++i)
 				{
-#if ESP32
+#ifdef ESP32
 					const WirelessConfigurationData * const tempData = reinterpret_cast<const WirelessConfigurationData*>(EEPROM.getDataPtr()+(i * sizeof(WirelessConfigurationData)));
 #else
 					const WirelessConfigurationData * const tempData = reinterpret_cast<const WirelessConfigurationData*>(EEPROM.getConstDataPtr()+(i * sizeof(WirelessConfigurationData)));
@@ -1180,7 +1198,7 @@ void ICACHE_RAM_ATTR ProcessRequest()
 				char *p = reinterpret_cast<char*>(transferBuffer);
 				for (size_t i = 0; i <= MaxRememberedNetworks; ++i)
 				{
-#if ESP32
+#ifdef ESP32
 					const WirelessConfigurationData * const tempData = reinterpret_cast<const WirelessConfigurationData*>(EEPROM.getDataPtr()+(i * sizeof(WirelessConfigurationData)));
 #else
 					const WirelessConfigurationData * const tempData = reinterpret_cast<const WirelessConfigurationData*>(EEPROM.getConstDataPtr()+(i * sizeof(WirelessConfigurationData)));
@@ -1220,7 +1238,7 @@ void ICACHE_RAM_ATTR ProcessRequest()
 				memcpy(webHostName, transferBuffer, HostNameLength);
 				webHostName[HostNameLength] = 0;			// ensure null terminator
 				debugPrintf("Set hostname to %s\n", webHostName);
-#if ESP32
+#ifdef ESP32
 				//NBNS.begin(webHostName);
 #elif LWIP_VERSION_MAJOR == 2
 				netbiosns_set_name(webHostName);
@@ -1392,7 +1410,7 @@ void ICACHE_RAM_ATTR ProcessRequest()
 				const uint8_t txPower = messageHeaderIn.hdr.flags;
 				if (txPower <= 82)
 				{
-#if !ESP32
+#ifndef ESP32
 					system_phy_set_max_tpw(txPower);
 #endif
 					SendResponse(ResponseEmpty);
@@ -1508,18 +1526,26 @@ void ICACHE_RAM_ATTR TransferReadyIsr()
 #define TOSTRING(x) STRINGIFY(x)
 void setup()
 {
-#if !ESP32
+	ets_printf("*** SETUP START ***\n");
+#ifndef ESP32
 	// Enable serial port for debugging
 	Serial.begin(WiFiBaudRate);
 	Serial.setDebugOutput(true);
 #endif
+	ets_printf("*** Setting LED pin ***\n");
+	ets_printf("*** About to call pinMode(%d, OUTPUT) ***\n", ONBOARD_LED);
 	// Turn off LED
 	pinMode(ONBOARD_LED, OUTPUT);
+	ets_printf("*** pinMode complete ***\n");
 	digitalWrite(ONBOARD_LED, !ONBOARD_LED_ON);
-	WiFi.mode(WIFI_OFF);
-	WiFi.persistent(false);
+	ets_printf("*** digitalWrite complete ***\n");
+	ets_printf("*** Initializing WiFi ***\n");
+	// Initialize WiFi properly - must enable it first to trigger low-level init
+	WiFi.mode(WIFI_STA);  // Enable STA mode to trigger WiFi initialization
+	WiFi.persistent(false);  // Now we can safely set persistent
+	WiFi.mode(WIFI_OFF);  // Now turn it off if needed
 
-#if ESP32
+#ifdef ESP32
 	const esp_reset_reason_t resetInfo = esp_reset_reason();
 	if (resetInfo != ESP_RST_POWERON)
 	{
@@ -1537,25 +1563,38 @@ void setup()
 	// Reserve some flash space for use as EEPROM. The maximum EEPROM supported by the core is SPI_FLASH_SEC_SIZE (4Kb).
 	const size_t eepromSizeNeeded = (MaxRememberedNetworks + 1) * sizeof(WirelessConfigurationData);
 	static_assert(eepromSizeNeeded <= SPI_FLASH_SEC_SIZE, "Insufficient EEPROM");
-#if ESP32
+#ifdef ESP32
+	ets_printf("*** Starting EEPROM init ***\n");
 	debugPrint("Loading nvs from nvs2\n");
-	EEPROM.begin("nvs2", eepromSizeNeeded);
+	EEPROM.begin(eepromSizeNeeded);
+	ets_printf("*** EEPROM initialized ***\n");
 	debugPrintf("cpu freq %d free memory %d\n", getCpuFrequencyMhz(), ESP.getFreeHeap());
 #else
 	EEPROM.begin(eepromSizeNeeded);
 #endif
 	// Set up the SPI subsystem
+	ets_printf("*** Setting up SPI pins ***\n");
     pinMode(SamTfrReadyPin, INPUT);
+#ifdef ESP32
+#if CONFIG_IDF_TARGET_ESP32S3
+    // ESP32-S3: Configure pull-down on transfer ready pin for clean signal detection
+    gpio_set_pull_mode((gpio_num_t)SamTfrReadyPin, GPIO_PULLDOWN_ONLY);
+#endif
+#endif
     pinMode(EspReqTransferPin, OUTPUT);
     digitalWrite(EspReqTransferPin, LOW);				// not ready to transfer data yet
     pinMode(SamSSPin, OUTPUT);
     digitalWrite(SamSSPin, HIGH);
 
     // Set up the fast SPI channel
+	ets_printf("*** Initializing HSPI ***\n");
     hspi.InitMaster(SPI_MODE1, defaultClockControl, true);
+	ets_printf("*** Initializing Connection ***\n");
     Connection::Init();
+	ets_printf("*** Initializing Listener ***\n");
     Listener::Init();
-#if ESP32
+	ets_printf("*** Network init complete ***\n");
+#ifdef ESP32
 	// We need to have initialised the WIFI component before we init mdns
 #elif LWIP_VERSION_MAJOR == 2
     mdns_resp_init();
@@ -1580,7 +1619,7 @@ void setup()
 void loop()
 {
 	digitalWrite(EspReqTransferPin, HIGH);				// tell the SAM we are ready to receive a command
-#if ESP32
+#ifdef ESP32
 #else
 	system_soft_wdt_feed();								// kick the watchdog
 #endif
@@ -1643,7 +1682,9 @@ void loop()
 		lastBlinkTime = millis();
 		digitalWrite(ONBOARD_LED, !currentState);
 	}
-		
+	
+	// Small delay to prevent watchdog timeout and allow RTOS to run other tasks
+	delay(1);
 }
 
 // End

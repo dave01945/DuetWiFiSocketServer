@@ -19,17 +19,27 @@
  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "HSPI.h"
-#if ESP32
-#include "config.h"
+#ifdef ESP32
+#include "Config.h"
 #include "esp_system.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
-#define DMA_CHAN    2
 
+// ESP32-S3 uses different pins and DMA configuration
+#if CONFIG_IDF_TARGET_ESP32S3
+#define DMA_CHAN    SPI_DMA_CH_AUTO  // ESP32-S3 uses auto DMA channel allocation
+#define PIN_NUM_MISO 37  // GPIO37 - SPI MISO on ESP32-S3
+#define PIN_NUM_MOSI 35  // GPIO35 - SPI MOSI on ESP32-S3
+#define PIN_NUM_CLK  36  // GPIO36 - SPI CLK on ESP32-S3
+#define PIN_NUM_CS   39  // GPIO39 - SPI CS
+#else
+#define DMA_CHAN    2
 #define PIN_NUM_MISO 19
 #define PIN_NUM_MOSI 23
 #define PIN_NUM_CLK  18
 #define PIN_NUM_CS   5
+#endif
+
 static spi_device_handle_t spi;
 static uint32_t currentClock = 0;
 
@@ -42,7 +52,12 @@ void HSPIClass::InitMaster(uint8_t mode, uint32_t clockReg, bool msbFirst)
     pinMode(PIN_NUM_CLK, OUTPUT);
     pinMode(PIN_NUM_MISO, INPUT);
     uint32_t dma = DMA_CHAN;
+#if CONFIG_IDF_TARGET_ESP32S3
+    // ESP32-S3: Start with slower speed for reliability with GPIO matrix routing
+    int clock = SPI_MASTER_FREQ_10M;
+#else
     int clock = SPI_MASTER_FREQ_20M;
+#endif
     switch(clockReg)
     {
     case spi26MHzDMA:
@@ -80,21 +95,30 @@ void HSPIClass::InitMaster(uint8_t mode, uint32_t clockReg, bool msbFirst)
         .quadwp_io_num=-1,
         .quadhd_io_num=-1,
         .max_transfer_sz=4094,
+#if CONFIG_IDF_TARGET_ESP32S3
+        .flags = SPICOMMON_BUSFLAG_MASTER,  // Use GPIO matrix on ESP32-S3 for flexibility
+#else
         .flags = SPICOMMON_BUSFLAG_MASTER|SPICOMMON_BUSFLAG_IOMUX_PINS,
+#endif
         .intr_flags = ESP_INTR_FLAG_IRAM
     };
     spi_device_interface_config_t devcfg={
-        .mode=1,
+        .mode=(uint8_t)mode,
         .clock_speed_hz=clock,
+#if CONFIG_IDF_TARGET_ESP32S3
+        .input_delay_ns=0,      // ESP32-S3 timing adjustment for high-speed SPI
+#endif
         .spics_io_num=-1,
         .flags = SPI_DEVICE_NO_DUMMY,
         .queue_size=4,
+        .pre_cb=NULL,
+        .post_cb=NULL
     };
     //Initialize the SPI bus
-    ret=spi_bus_initialize(VSPI_HOST, &buscfg, dma);
+    ret=spi_bus_initialize(SPI3_HOST, &buscfg, dma);
     ESP_ERROR_CHECK(ret);
     //Attach to the SPI bus
-    ret=spi_bus_add_device(VSPI_HOST, &devcfg, &spi);
+    ret=spi_bus_add_device(SPI3_HOST, &devcfg, &spi);
     ESP_ERROR_CHECK(ret);
     spi_device_acquire_bus(spi, portMAX_DELAY);
     ESP_ERROR_CHECK(ret);
@@ -105,7 +129,7 @@ void HSPIClass::end() {
     spi_device_release_bus(spi);
     esp_err_t ret = spi_bus_remove_device(spi);
     ESP_ERROR_CHECK(ret);
-    ret = spi_bus_free(VSPI_HOST);
+    ret = spi_bus_free(SPI3_HOST);
     ESP_ERROR_CHECK(ret);
 }
 

@@ -573,7 +573,7 @@ void Connection::Close()
 			SetState(ConnState::closePending);		// wait for the remaining data to be sent before closing
 			break;
 		}
-		// no break
+		__attribute__((fallthrough));
 	case ConnState::otherEndClosed:					// the other end has already closed the connection
 	case ConnState::closeReady:						// the other end has closed and we were already closePending
 	default:										// should not happen
@@ -832,7 +832,7 @@ int Connection::Accept(tcp_pcb *pcb)
 	SetState(ConnState::connected);
 	localPort = pcb->local_port;
 	remotePort = pcb->remote_port;
-	remoteIp = pcb->remote_ip.addr;
+	remoteIp = pcb->remote_ip.u_addr.ip4.addr;
 	writeTimer = closeTimer = 0;
 	unAcked = readIndex = 0;
 

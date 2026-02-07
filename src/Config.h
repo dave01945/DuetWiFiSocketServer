@@ -1,7 +1,7 @@
 // Configuration for RepRapWiFi
 #ifndef CONFIG_H_INCLUDED
 #define CONFIG_H_INCLUDED
-#if ESP32
+#ifdef ESP32
 # include "esp_attr.h"
 # ifdef ICACHE_RAM_ATTR
 #  undef ICACHE_RAM_ATTR
@@ -20,7 +20,7 @@
 #endif
 #elif defined(STM32F4)
 #define VERSION_HOSTSYS "S"
-#elif ESP32
+#elif defined(ESP32)
 #define VERSION_HOSTSYS "S32"
 #else
 #define VERSION_HOSTSYS "D"
@@ -44,7 +44,7 @@ const char* const firmwareVersion = VERSION_MAIN VERSION_HOSTSYS VERSION_DEBUG V
 // ************ This must be kept in step with the corresponding value in RepRapFirmware *************
 const uint32_t maxSpiFileData = 2048;
 
-#if ESP32
+#ifdef ESP32
 // ESP32 clock control
 // The actual numbers used ar arbitary and have been choosen to provide some degree
 // of backwards compatibility with the Duet3D code
@@ -80,10 +80,16 @@ const uint32_t defaultClockControl = 0x2002;		// 80MHz/3, mark:space 2:1
 #endif
 
 // Pin numbers
-#if ESP32
+#ifdef ESP32
+#if CONFIG_IDF_TARGET_ESP32S3
+const int SamSSPin = 39;          // GPIO39, output to SAM, SS pin for SPI transfer
+const int EspReqTransferPin = 0;  // GPIO0, output, indicates to the SAM that we want to send something
+const int SamTfrReadyPin = 4;     // GPIO4, input, indicates that SAM is ready to execute an SPI transaction
+#else
 const int SamSSPin = 5;           // GPIO05, output to SAM, SS pin for SPI transfer
 const int EspReqTransferPin = 0;  // GPIO0, output, indicates to the SAM that we want to send something
 const int SamTfrReadyPin = 4;     // GPIO4, input, indicates that SAM is ready to execute an SPI transaction
+#endif
 #else
 const int SamSSPin = 15;          // GPIO15, output to SAM, SS pin for SPI transfer
 const int EspReqTransferPin = 0;  // GPIO0, output, indicates to the SAM that we want to send something

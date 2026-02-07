@@ -1,3 +1,6 @@
 {
-    "C_Cpp.dimInactiveRegions": false
+    "C_Cpp.dimInactiveRegions": false,
+    "idf.currentSetup": "/home/david/.espressif/v5.5.2/esp-idf",
+    "idf.port": "/dev/ttyACM0",
+    "idf.flashType": "UART"
 }

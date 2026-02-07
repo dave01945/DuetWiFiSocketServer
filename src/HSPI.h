@@ -24,7 +24,7 @@
 #include <Arduino.h>
 #include <stdlib.h>
 
-#if !ESP32
+#if !defined(ARDUINO_ARCH_ESP32) && !defined(ESP32)
 const uint8_t SPI_MODE0 = 0x00; ///<  CPOL: 0  CPHA: 0
 const uint8_t SPI_MODE1 = 0x01; ///<  CPOL: 0  CPHA: 1
 const uint8_t SPI_MODE2 = 0x10; ///<  CPOL: 1  CPHA: 0

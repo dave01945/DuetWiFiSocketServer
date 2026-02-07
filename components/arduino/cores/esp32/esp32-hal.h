@@ -31,17 +31,18 @@
 #include "sdkconfig.h"
 #include "esp_system.h"
 #include "esp_sleep.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/event_groups.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #ifndef F_CPU
-#if CONFIG_IDF_TARGET_ESP32 // ESP32/PICO-D4
-#define F_CPU (CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000U)
-#elif CONFIG_IDF_TARGET_ESP32S2
-#define F_CPU (CONFIG_ESP32S2_DEFAULT_CPU_FREQ_MHZ * 1000000U)
-#endif
+#define F_CPU (CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ * 1000000U)
 #endif
 
 #if CONFIG_ARDUINO_ISR_IRAM
@@ -60,19 +61,34 @@ extern "C" {
 #define ARDUINO_EVENT_RUNNING_CORE CONFIG_ARDUINO_EVENT_RUNNING_CORE
 #endif
 
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3
+static const uint8_t BOOT_PIN = 0;
+#elif CONFIG_IDF_TARGET_ESP32C2 || CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32H2 \
+  || CONFIG_IDF_TARGET_ESP32C61
+static const uint8_t BOOT_PIN = 9;
+#elif CONFIG_IDF_TARGET_ESP32P4
+static const uint8_t BOOT_PIN = 35;
+#elif CONFIG_IDF_TARGET_ESP32C5
+static const uint8_t BOOT_PIN = 28;
+#else
+#error BOOT_PIN not defined for this chip!
+#endif
+#define BOOT_PIN BOOT_PIN
+
 //forward declaration from freertos/portmacro.h
 void vPortYield(void);
 void yield(void);
 #define optimistic_yield(u)
 
 #define ESP_REG(addr) *((volatile uint32_t *)(addr))
-#define NOP() asm volatile ("nop")
+#define NOP()         asm volatile("nop")
 
 #include "esp32-hal-log.h"
 #include "esp32-hal-matrix.h"
 #include "esp32-hal-uart.h"
 #include "esp32-hal-gpio.h"
 #include "esp32-hal-touch.h"
+#include "esp32-hal-touch-ng.h"
 #include "esp32-hal-dac.h"
 #include "esp32-hal-adc.h"
 #include "esp32-hal-spi.h"
@@ -83,10 +99,19 @@ void yield(void);
 #include "esp32-hal-timer.h"
 #include "esp32-hal-bt.h"
 #include "esp32-hal-psram.h"
+#include "esp32-hal-rgb-led.h"
 #include "esp32-hal-cpu.h"
+#include "esp32-hal-hosted.h"
+
+void analogWrite(uint8_t pin, int value);
+void analogWriteFrequency(uint8_t pin, uint32_t freq);
+void analogWriteResolution(uint8_t pin, uint8_t bits);
 
 //returns chip temperature in Celsius
 float temperatureRead();
+
+//allows user to bypass SPI RAM test routine
+bool testSPIRAM(void);
 
 #if CONFIG_AUTOSTART_ARDUINO
 //enable/disable WDT for Arduino's setup and loop functions
@@ -98,22 +123,19 @@ void feedLoopWDT();
 
 //enable/disable WDT for the IDLE task on Core 0 (SYSTEM)
 void enableCore0WDT();
-void disableCore0WDT();
+bool disableCore0WDT();
 #ifndef CONFIG_FREERTOS_UNICORE
 //enable/disable WDT for the IDLE task on Core 1 (Arduino)
 void enableCore1WDT();
-void disableCore1WDT();
+bool disableCore1WDT();
 #endif
 
 //if xCoreID < 0 or CPU is unicore, it will use xTaskCreate, else xTaskCreatePinnedToCore
 //allows to easily handle all possible situations without repetitive code
-BaseType_t xTaskCreateUniversal( TaskFunction_t pxTaskCode,
-                        const char * const pcName,
-                        const uint32_t usStackDepth,
-                        void * const pvParameters,
-                        UBaseType_t uxPriority,
-                        TaskHandle_t * const pxCreatedTask,
-                        const BaseType_t xCoreID );
+BaseType_t xTaskCreateUniversal(
+  TaskFunction_t pxTaskCode, const char *const pcName, const uint32_t usStackDepth, void *const pvParameters, UBaseType_t uxPriority,
+  TaskHandle_t *const pxCreatedTask, const BaseType_t xCoreID
+);
 
 unsigned long micros();
 unsigned long millis();
@@ -127,6 +149,22 @@ void arduino_phy_init();
 #if !CONFIG_AUTOSTART_ARDUINO
 void initArduino();
 #endif
+
+typedef struct {
+  int core;                    // core which triggered panic
+  const char *reason;          // exception string
+  const void *pc;              // instruction address that triggered the exception
+  bool backtrace_corrupt;      // if backtrace is corrupt
+  bool backtrace_continues;    // if backtrace continues, but did not fit
+  unsigned int backtrace_len;  // number of backtrace addresses
+  unsigned int backtrace[60];  // backtrace addresses array
+} arduino_panic_info_t;
+
+typedef void (*arduino_panic_handler_t)(arduino_panic_info_t *info, void *arg);
+
+void set_arduino_panic_handler(arduino_panic_handler_t handler, void *arg);
+arduino_panic_handler_t get_arduino_panic_handler(void);
+void *get_arduino_panic_handler_arg(void);
 
 #ifdef __cplusplus
 }
