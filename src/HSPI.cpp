@@ -19,6 +19,11 @@
  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #include "HSPI.h"
+#include "sdkconfig.h"
+#if !defined(ESP32) && (defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32H2) || defined(CONFIG_IDF_TARGET_ESP32P4))
+#define ESP32 1
+#endif
+
 #ifdef ESP32
 #include "Config.h"
 #include "esp_system.h"
@@ -94,7 +99,7 @@ void HSPIClass::InitMaster(uint8_t mode, uint32_t clockReg, bool msbFirst)
         .sclk_io_num=PIN_NUM_CLK,
         .quadwp_io_num=-1,
         .quadhd_io_num=-1,
-        .max_transfer_sz=4094,
+        .max_transfer_sz=4096,
 #if CONFIG_IDF_TARGET_ESP32S3
         .flags = SPICOMMON_BUSFLAG_MASTER,  // Use GPIO matrix on ESP32-S3 for flexibility
 #else
@@ -177,7 +182,12 @@ uint32_t ICACHE_RAM_ATTR HSPIClass::transfer32(uint32_t data)
     return reply;
 }
 
+#if CONFIG_IDF_TARGET_ESP32S3
+// ESP32-S3: DMA buffer must be in internal RAM and properly aligned
+DMA_ATTR uint32_t dummy[maxSpiFileData];
+#else
 uint32_t dummy[maxSpiFileData];
+#endif
 /**
  * @param out uint32_t *
  * @param in  uint32_t *

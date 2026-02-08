@@ -20,6 +20,8 @@
 #endif
 #elif defined(STM32F4)
 #define VERSION_HOSTSYS "S"
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+#define VERSION_HOSTSYS "S32S3"
 #elif defined(ESP32)
 #define VERSION_HOSTSYS "S32"
 #else

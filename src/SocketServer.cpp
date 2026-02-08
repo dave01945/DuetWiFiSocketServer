@@ -6,6 +6,10 @@
  */
 
 #include "ecv.h"
+#include "sdkconfig.h"
+#if !defined(ESP32) && (defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32H2) || defined(CONFIG_IDF_TARGET_ESP32P4))
+#define ESP32 1
+#endif
 #undef yield
 #undef array
 #undef out
@@ -50,6 +54,7 @@ extern "C"
 #include "mdns.h"
 #include "esp_flash.h"
 #include "esp_mac.h"
+#include "esp_heap_caps.h"
 #include "spi_flash_mmap.h"
 #include "NetBIOS.h"
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -124,7 +129,30 @@ ADC_MODE(ADC_VCC);          // need this for the ESP.getVcc() call to work
 static HSPIClass hspi;
 static uint32_t connectStartTime;
 static uint32_t lastStatusReportTime;
+#ifdef ESP32
+static uint32_t lastHeapCheckTime = 0;
+#endif
+#if CONFIG_IDF_TARGET_ESP32S3
+// ESP32-S3: DMA buffers must be properly aligned and in internal RAM
+DMA_ATTR static uint32_t transferBuffer[NumDwords(MaxDataLength + 1)];
+#else
 static uint32_t transferBuffer[NumDwords(MaxDataLength + 1)];
+#endif
+
+static inline void SetTransferBufferGuard()
+{
+	transferBuffer[NumDwords(MaxDataLength)] = 0xDEADBEEF;
+}
+
+static inline void CheckTransferBufferGuard(const char *context)
+{
+	if (transferBuffer[NumDwords(MaxDataLength)] != 0xDEADBEEF)
+	{
+		debugPrintAlways("Transfer buffer overflow detected\n");
+		debugPrintfAlways("Context: %s\n", context);
+		abort();
+	}
+}
 static bool WiFiInitialised = false;
 
 static const WirelessConfigurationData *ssidData = nullptr;
@@ -783,9 +811,23 @@ void StartAccessPoint()
 		debugPrintf("%s\n", lastError);
 		currentState = WiFiState::idle;
 		digitalWrite(ONBOARD_LED, !ONBOARD_LED_ON);
-	}
+		}
 }
 
+#if CONFIG_IDF_TARGET_ESP32S3
+// ESP32-S3: DMA buffers must be properly aligned  
+DMA_ATTR static union
+{
+	MessageHeaderSamToEsp hdr;			// the actual header
+	uint32_t asDwords[headerDwords];	// to force alignment
+} messageHeaderIn;
+
+DMA_ATTR static union
+{
+	MessageHeaderEspToSam hdr;
+	uint32_t asDwords[headerDwords];	// to force alignment
+} messageHeaderOut;
+#else
 static union
 {
 	MessageHeaderSamToEsp hdr;			// the actual header
@@ -797,6 +839,7 @@ static union
 	MessageHeaderEspToSam hdr;
 	uint32_t asDwords[headerDwords];	// to force alignment
 } messageHeaderOut;
+#endif
 
 #ifdef ESP32
 static uint32_t GetResetReason()
@@ -943,7 +986,9 @@ void ICACHE_RAM_ATTR SendResponse(int32_t response)
 	(void)hspi.transfer32(response);
 	if (response > 0)
 	{
+		SetTransferBufferGuard();
 		hspi.transferDwords(transferBuffer, nullptr, NumDwords((size_t)response));
+		CheckTransferBufferGuard("SendResponse tx");
 	}
 }
 
@@ -1004,7 +1049,9 @@ void ICACHE_RAM_ATTR ProcessRequest()
 				messageHeaderIn.hdr.param32 = hspi.transfer32(ResponseEmpty);
 				if (messageHeaderIn.hdr.dataLength != 0 && messageHeaderIn.hdr.dataLength <= SsidLength + 1)
 				{
+					SetTransferBufferGuard();
 					hspi.transferDwords(nullptr, transferBuffer, NumDwords(messageHeaderIn.hdr.dataLength));
+					CheckTransferBufferGuard("networkStartClient rx");
 					reinterpret_cast<char *>(transferBuffer)[messageHeaderIn.hdr.dataLength] = 0;
 				}
 			}
@@ -1094,7 +1141,9 @@ void ICACHE_RAM_ATTR ProcessRequest()
 			if (messageHeaderIn.hdr.dataLength == sizeof(WirelessConfigurationData))
 			{
 				messageHeaderIn.hdr.param32 = hspi.transfer32(ResponseEmpty);
+				SetTransferBufferGuard();
 				hspi.transferDwords(nullptr, transferBuffer, NumDwords(sizeof(WirelessConfigurationData)));
+				CheckTransferBufferGuard("networkAddSsid rx");
 				const WirelessConfigurationData * const receivedClientData = reinterpret_cast<const WirelessConfigurationData *>(transferBuffer);
 				int index;
 				if (messageHeaderIn.hdr.command == NetworkCommand::networkConfigureAccessPoint)
@@ -1141,7 +1190,9 @@ void ICACHE_RAM_ATTR ProcessRequest()
 			if (messageHeaderIn.hdr.dataLength == SsidLength)
 			{
 				messageHeaderIn.hdr.param32 = hspi.transfer32(ResponseEmpty);
+				SetTransferBufferGuard();
 				hspi.transferDwords(nullptr, transferBuffer, NumDwords(SsidLength));
+				CheckTransferBufferGuard("networkDeleteSsid rx");
 
 				int index;
 				if (RetrieveSsidData(reinterpret_cast<char*>(transferBuffer), &index) != nullptr)
@@ -1196,6 +1247,8 @@ void ICACHE_RAM_ATTR ProcessRequest()
 		case NetworkCommand::networkListSsids_deprecated:	// list the access points we know about, plus our own access point details
 			{
 				char *p = reinterpret_cast<char*>(transferBuffer);
+				char * const bufferEnd = reinterpret_cast<char*>(transferBuffer) + MaxDataLength;
+				bool overflow = false;
 				for (size_t i = 0; i <= MaxRememberedNetworks; ++i)
 				{
 #ifdef ESP32
@@ -1207,19 +1260,52 @@ void ICACHE_RAM_ATTR ProcessRequest()
 					{
 						for (size_t j = 0; j < SsidLength && tempData->ssid[j] != 0; ++j)
 						{
+							if (p >= bufferEnd)
+							{
+								overflow = true;
+								break;
+							}
 							*p++ = tempData->ssid[j];
+						}
+						if (overflow)
+						{
+							break;
+						}
+						if (p >= bufferEnd)
+						{
+							overflow = true;
+							break;
 						}
 						*p++ = '\n';
 					}
 					else if (i == 0)
 					{
 						// Include an empty entry for our own access point SSID
+						if (p >= bufferEnd)
+						{
+							overflow = true;
+							break;
+						}
 						*p++ = '\n';
 					}
+					if (overflow)
+					{
+						break;
+					}
 				}
-				*p++ = 0;
+				if (!overflow)
+				{
+					if (p >= bufferEnd)
+					{
+						overflow = true;
+					}
+					else
+					{
+						*p++ = 0;
+					}
+				}
 				const size_t numBytes = p - reinterpret_cast<char*>(transferBuffer);
-				if (numBytes <= dataBufferAvailable)
+				if (!overflow && numBytes <= dataBufferAvailable)
 				{
 					SendResponse(numBytes);
 				}
@@ -1234,7 +1320,9 @@ void ICACHE_RAM_ATTR ProcessRequest()
 			if (messageHeaderIn.hdr.dataLength == HostNameLength)
 			{
 				messageHeaderIn.hdr.param32 = hspi.transfer32(ResponseEmpty);
+				SetTransferBufferGuard();
 				hspi.transferDwords(nullptr, transferBuffer, NumDwords(HostNameLength));
+				CheckTransferBufferGuard("networkSetHostName rx");
 				memcpy(webHostName, transferBuffer, HostNameLength);
 				webHostName[HostNameLength] = 0;			// ensure null terminator
 				debugPrintf("Set hostname to %s\n", webHostName);
@@ -1279,7 +1367,10 @@ void ICACHE_RAM_ATTR ProcessRequest()
 			{
 				messageHeaderIn.hdr.param32 = hspi.transfer32(ResponseEmpty);
 				ListenOrConnectData lcData;
-				hspi.transferDwords(nullptr, reinterpret_cast<uint32_t*>(&lcData), NumDwords(sizeof(lcData)));
+				SetTransferBufferGuard();
+				hspi.transferDwords(nullptr, transferBuffer, NumDwords(sizeof(lcData)));
+				CheckTransferBufferGuard("networkListen rx");
+				memcpy(&lcData, transferBuffer, sizeof(lcData));
 				const bool ok = Listener::Listen(lcData.remoteIp, lcData.port, lcData.protocol, lcData.maxConnections);
 				if (ok)
 				{
@@ -1303,7 +1394,10 @@ void ICACHE_RAM_ATTR ProcessRequest()
 			{
 				messageHeaderIn.hdr.param32 = hspi.transfer32(ResponseEmpty);
 				ListenOrConnectData lcData;
-				hspi.transferDwords(nullptr, reinterpret_cast<uint32_t*>(&lcData), NumDwords(sizeof(lcData)));
+				SetTransferBufferGuard();
+				hspi.transferDwords(nullptr, transferBuffer, NumDwords(sizeof(lcData)));
+				CheckTransferBufferGuard("networkStopListening rx");
+				memcpy(&lcData, transferBuffer, sizeof(lcData));
 				Listener::StopListening(lcData.port);
 				RebuildServices();						// update the MDNS services
 				debugPrintf("Stopped listening on port %u\n", lcData.port);
@@ -1340,18 +1434,34 @@ void ICACHE_RAM_ATTR ProcessRequest()
 			{
 				Connection& conn = Connection::Get(messageHeaderIn.hdr.socketNumber);
 				const size_t avail = conn.Avail();
+				const size_t maxRead = std::min<size_t>(messageHeaderIn.hdr.dataBufferAvailable, MaxDataLength);
 				if (avail > 0)
 				{
 					//debugPrintf("Using avail %d\n", avail);
-					const size_t amount = std::min<size_t>(messageHeaderIn.hdr.dataBufferAvailable, avail);
+					const size_t amount = std::min<size_t>(maxRead, avail);
+					SetTransferBufferGuard();
+					memcpy(transferBuffer, conn.ReadAvail(amount), amount);
+					const size_t padded = NumDwords(amount) * sizeof(uint32_t);
+					if (padded > amount)
+					{
+						memset(reinterpret_cast<uint8_t*>(transferBuffer) + amount, 0, padded - amount);
+					}
 					messageHeaderIn.hdr.param32 = hspi.transfer32(amount);
-					hspi.transferDwords((uint32_t *)conn.ReadAvail(amount), nullptr, NumDwords(amount));
+					hspi.transferDwords(transferBuffer, nullptr, NumDwords(amount));
+					CheckTransferBufferGuard("connRead tx avail");
 				}
 				else
 				{
-					const size_t amount = conn.Read(reinterpret_cast<uint8_t *>(transferBuffer), std::min<size_t>(messageHeaderIn.hdr.dataBufferAvailable, MaxDataLength));
+					SetTransferBufferGuard();
+					const size_t amount = conn.Read(reinterpret_cast<uint8_t *>(transferBuffer), maxRead);
 					messageHeaderIn.hdr.param32 = hspi.transfer32(amount);
+					const size_t padded = NumDwords(amount) * sizeof(uint32_t);
+					if (padded > amount)
+					{
+						memset(reinterpret_cast<uint8_t*>(transferBuffer) + amount, 0, padded - amount);
+					}
 					hspi.transferDwords(transferBuffer, nullptr, NumDwords(amount));
+					CheckTransferBufferGuard("connRead tx");
 				}
 				activeIO = true;
 			}
@@ -1370,7 +1480,9 @@ void ICACHE_RAM_ATTR ProcessRequest()
 				const bool closeAfterSending = (acceptedLength == requestedlength) && (messageHeaderIn.hdr.flags & MessageHeaderSamToEsp::FlagCloseAfterWrite) != 0;
 				const bool push = (acceptedLength == requestedlength) && (messageHeaderIn.hdr.flags & MessageHeaderSamToEsp::FlagPush) != 0;
 				messageHeaderIn.hdr.param32 = hspi.transfer32(acceptedLength);
+				SetTransferBufferGuard();
 				hspi.transferDwords(nullptr, transferBuffer, NumDwords(acceptedLength));
+				CheckTransferBufferGuard("connWrite rx");
 				const size_t written = conn.Write(reinterpret_cast<uint8_t *>(transferBuffer), acceptedLength, push, closeAfterSending);
 				if (written != acceptedLength)
 				{
@@ -1392,7 +1504,8 @@ void ICACHE_RAM_ATTR ProcessRequest()
 				ConnStatusResponse resp;
 				conn.GetStatus(resp);
 				Connection::GetSummarySocketStatus(resp.connectedSockets, resp.otherEndClosedSockets);
-				hspi.transferDwords(reinterpret_cast<const uint32_t *>(&resp), nullptr, NumDwords(sizeof(resp)));
+				memcpy(transferBuffer, &resp, sizeof(resp));
+				hspi.transferDwords(transferBuffer, nullptr, NumDwords(sizeof(resp)));
 			}
 			else
 			{
@@ -1614,6 +1727,9 @@ void setup()
 	digitalWrite(EspReqTransferPin, HIGH);				// tell the SAM we are ready to receive a command
 	debugPrint("Init completed\n");
 	debugPrintfAlways("\n\nDuetWiFiSocketServer version %s ready\n\n", firmwareVersion);
+#ifdef ESP32
+	debugPrintAlways("ESP32 build path active\n");
+#endif
 }
 
 void loop()
@@ -1622,6 +1738,18 @@ void loop()
 #ifdef ESP32
 #else
 	system_soft_wdt_feed();								// kick the watchdog
+#endif
+
+#ifdef ESP32
+	if (millis() - lastHeapCheckTime >= 1000)
+	{
+		lastHeapCheckTime = millis();
+		if (!heap_caps_check_integrity_all(true))
+		{
+			debugPrintAlways("Heap corruption detected\n");
+			abort();
+		}
+	}
 #endif
 
 	if (   (lastError != prevLastError || connectErrorChanged || currentState != prevCurrentState)

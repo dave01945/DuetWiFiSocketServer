@@ -5,7 +5,12 @@
  *      Author: David
  */
 
-#if ESP32
+#include "sdkconfig.h"
+#if !defined(ESP32) && (defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32H2) || defined(CONFIG_IDF_TARGET_ESP32P4))
+#define ESP32 1
+#endif
+
+#ifdef ESP32
 #include "Connection.h"
 #include "algorithm"			// for std::min
 #include "Arduino.h"			// for millis
@@ -92,6 +97,12 @@ void Connection::Terminate(bool external)
 
 void ICACHE_RAM_ATTR Connection::WritePoll()
 {
+	if (outPos + outCnt > WBUFFER_SIZE)
+	{
+		// Buffer state is corrupt; close to avoid memory damage.
+		Terminate(false);
+		return;
+	}
 	if (outCnt > 0)
 	{
 		int ret = write(sock, outBuf + outPos, outCnt);
@@ -113,6 +124,12 @@ void ICACHE_RAM_ATTR Connection::WritePoll()
 
 void ICACHE_RAM_ATTR Connection::ReadPoll()
 {
+	if (inPos + inCnt > RBUFFER_SIZE)
+	{
+		// Buffer state is corrupt; close to avoid memory damage.
+		Terminate(false);
+		return;
+	}
 	size_t len = RBUFFER_SIZE - (inPos + inCnt);
 	if (len > 0)
 	{
@@ -218,9 +235,15 @@ size_t ICACHE_RAM_ATTR Connection::Write(const uint8_t *data, size_t length, boo
 	{
 		return 0;
 	}
+	if (outPos + outCnt > WBUFFER_SIZE)
+	{
+		// Buffer state is corrupt; close to avoid further memory damage.
+		Terminate(false);
+		return 0;
+	}
 	size_t len = WBUFFER_SIZE - (outPos + outCnt);
 	if (len > length) len = length;
-	memcpy(outBuf + outCnt, data, len);
+	memcpy(outBuf + outPos + outCnt, data, len);
 	outCnt += len;
 	//debugPrintf("write end outCnt %d\n", outCnt);
 	return len;
@@ -282,6 +305,10 @@ size_t ICACHE_RAM_ATTR Connection::Avail()
 
 uint8_t * ICACHE_RAM_ATTR Connection::ReadAvail(size_t len)
 {
+	if (len > inCnt)
+	{
+		len = inCnt;
+	}
 	uint8_t *ret = inBuf + inPos;
 	inCnt -= len;
 	if (inCnt == 0)
